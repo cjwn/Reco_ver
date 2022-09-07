@@ -1,0 +1,17 @@
+# 忽略所有json文件
+*.json
+
+# 忽略所有pyc文件
+*.pyc
+
+# 忽略build文件夹
+/build
+
+# 忽略.idea
+.idea
+
+# 忽略.exe
+*.exe
+
+# 忽略.spec
+*.spec
