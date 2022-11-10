@@ -1,6 +1,28 @@
+import csv
 import ctypes
 import os
+import time
+import json
 from ctypes import wintypes, Structure
+from specs import KNOWNFOLDERID_LIST
+from functools import wraps
+from SQLmanager import SqlWorker
+
+
+def time_it(func):
+    '''
+    计时装饰器，统计函数运行时间
+    '''
+
+    @wraps(func)
+    def decorated(*args, **kwargs):
+        start_time = time.time()
+        r = func(*args, **kwargs)
+        duration = time.time() - start_time
+        print('Name: ', func.__name__, 'Duration: ', duration)
+        return r
+
+    return decorated
 
 
 class GUID(Structure):
@@ -102,23 +124,73 @@ class Folders(object):
 
 
 class Scan():
-    def __init__(self) -> None:
+    def __init__(self, cnn) -> None:
+        self.d = []
+        self.s = 0
+        self.files_count = 0
+        self.total_file = []
+        self.cnn = cnn
+
+
+    def clear(self):
         self.d = []
         self.s = 0
         self.files_count = 0
 
     def scan(self, dir, alias=None):
+
+        commit_count = 0
         for i in os.scandir(dir):
             if alias == 'Documents' and (i.name in ("My Music", "My Pictures", "My Videos")):
                 continue
             if i.is_dir():
-                self.scan(i)
+                self.scan(i, alias)
             else:
                 self.d.append(i.path)
                 self.s += i.stat().st_size
+                cmand = f'insert into FILES values(null, "{i.name}", "{i.path}", {i.stat().st_size}, "{alias}")'
+                self.cnn.sqlcmd(cmand)
+                # self.cnn.commit()
+                # commit_count+=1
+                # if commit_count >1:
+                #     cnn.commit()
+                #     commit_count = 0
+                # cnn.commit()
+                # make_csv_by_line(i) #这句是写入csv文件，会严重拖慢速度，暂时关闭
+                file_info = [i.name, i.path, i.stat().st_size, i.path.split('.')[-1], alias]
+                self.total_file.append(file_info)
                 if i.is_file():
                     self.files_count += 1
 
+
+@time_it
+def make_json(info):
+    with open('folders.json', 'w', encoding='utf-8') as f:
+        json.dump(info, f, ensure_ascii=False)
+
+
+def make_csv_by_line(z):
+    header = ['name', 'path', 'size']
+    exist = False
+    data = [z.name, z.path, z.stat().st_size]
+    if os.path.exists('temp.csv'):
+        exist = True
+
+    with open('temp.csv', mode='a', encoding='utf-8-sig', newline='') as f:
+        writer = csv.writer(f)
+        if not exist:
+            writer.writerow(header)
+        writer.writerow(data)
+
+@time_it
+def make_csv_by_batch(z):
+    header = ['name', 'path', 'size', 'suffix', 'alias']
+    with open('btemp.csv', mode='w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(z)
+
+    
 
 def get_doc_path(CSIDL_PERSONAL):
     buf = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
@@ -132,3 +204,63 @@ def SHGetKnownFolderPath(info):
     ctypes.windll.shell32.SHGetKnownFolderPath(info, 0, None, ctypes.byref(ptr))
     return ptr.value
 
+
+def str_of_size(size):
+    '''
+    递归实现，精确为最大单位值 + 小数点后三位
+    '''
+
+    def strofsize(integer, remainder, level):
+        if integer >= 1024:
+            remainder = integer % 1024
+            integer //= 1024
+            level += 1
+            return strofsize(integer, remainder, level)
+        else:
+            return integer, remainder, level
+
+    units = ['B', 'K', 'M', 'G', 'T', 'PB']
+    integer, remainder, level = strofsize(size, 0, 0)
+    if level + 1 > len(units):
+        level = -1
+    return ('{}.{:>03d}{}'.format(integer, remainder, units[level]))
+
+
+@time_it
+def scan_files(cnn):
+    '''主要方法，进行文件扫描，生成的是总计大小和文件夹信息'''
+    path_list = []
+    total_size = 0
+    total_files_count = 0
+    a = Folders()
+    s = Scan(cnn)
+    for i in range(60):
+        # 获取个人文件夹的地址及别名
+        if not a.set_some_folder(i):
+            # 如果没找到对应的文件夹，就跳过找下一个
+            continue
+        # s = Scan()
+        s.clear()
+        s.scan(a.path, a.alias)
+        file_dict = {'path': a.path, "name": a.alias,
+                     "subfolders": s.d, "size": s.s}
+        path_list.append(file_dict)
+        total_size += s.s
+        total_files_count += s.files_count
+    a.get_known_folder(KNOWNFOLDERID_LIST)
+    # s = Scan()
+    s.clear()
+    s.scan(a.path, a.alias)
+
+    subfolders_list = s.d
+    file_dict = {'path': a.path, "name": a.alias,
+                 "subfolders": subfolders_list, "size": s.s}
+    path_list.append(file_dict)
+    total_size += s.s
+    total_files_count += s.files_count
+    total_info = {"st_size": total_size, "size": str_of_size(
+        total_size), "files": total_files_count, "path_list": path_list}
+
+    info = f'{str_of_size(total_size)}, total {total_files_count} files'
+    # s.cnn.commit()
+    return info, total_info, s.total_file

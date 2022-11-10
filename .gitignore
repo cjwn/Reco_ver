@@ -15,3 +15,7 @@
 
 # 忽略.spec
 *.spec
+
+*.db
+
+*.csv
